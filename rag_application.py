@@ -224,12 +224,13 @@ def handle_user_input(state: MainState) -> MainState:
     1. Carefully analyze the user input and conversation history to select the appropriate tool. You can only select one tool.
     2. Determine if the input is a **chitchat** (e.g., greetings, personal questions like "What is your name?", "How are you?", or other social interactions). For this, select the **chitchat** tool.
     3. If the input is related to specific services, products, or information (like details about KCB products), select the **RAG** tool.
-    4. Chitchat examples include: "Hello", "How are you?", "What is your name?", "What’s the weather like?", etc.
+    4. Chitchat examples include: "Hello", "How are you?", "What is your name?", "What's the weather like?", "tell me a joke" etc.
     5. If it is a chitchat query, respond appropriately and update the user with the response.
+        Examples of chitchat responses include: "Hello! How can I assist you today?", "I'm Qweli, your virtual assistant. How may I help you?", "Nice to meet you! How can I assist you today?", "I'm here to help you with any questions you have. What's on your mind?"
     6. Use **chitchat** to ask for clarifications if the user's query is unclear.
     7. Ensure that you provide the required parameters & justification for the tool selected.
 
-    Expected format:
+    Expected format if the tool selected is RAG:
     {{
         "response_type": "tool_selection",
         "selected_tool": {{
@@ -237,6 +238,19 @@ def handle_user_input(state: MainState) -> MainState:
             "reason": "User query is about specific information or products",
             "parameters": {{
                 "user_query": "{user_query}"
+            }}
+        }}
+    }}
+
+
+    Expected format if the tool selected is chitchat:
+    {{
+        "response_type": "tool_selection",
+        "selected_tool": {{
+            "name": "chitchat",
+            "reason": "User query is a chitchat",
+            "parameters": {{
+                "response": The reponse to the user chitchat.
             }}
         }}
     }}
@@ -253,6 +267,7 @@ def handle_user_input(state: MainState) -> MainState:
         
         llm_response = json.loads(llm_response)
         
+        print(f"LLM response JSON: {llm_response}")
         # Ensure only one tool is selected
         selected_tool = llm_response.get("selected_tool", {})
         if not selected_tool:
@@ -264,6 +279,7 @@ def handle_user_input(state: MainState) -> MainState:
             "reason": selected_tool["reason"],
             "parameters": selected_tool.get("parameters", {})
         }
+
         
         # Update conversation history with user input
         state["conversation_history"].append({"role": "user", "content": user_query})
@@ -271,14 +287,13 @@ def handle_user_input(state: MainState) -> MainState:
         # Check if the selected tool is chitchat
         if selected_tool["name"].lower() == "chitchat":
             # Explicitly update qweli_response for chitchat
-            state["qweli_response"] = selected_tool["parameters"]
+            state["qweli_response"] = selected_tool["parameters"]["response"]
             # Update conversation history with the chitchat response
             state["conversation_history"].append({"role": "assistant", "content": state["qweli_response"]})
             
             # Establish PostgreSQL connection
-            dbname = "postgres"
             table_name = "public.respond_to_human"
-            conn = get_postgres_connection(dbname, table_name)
+            conn = get_postgres_connection(table_name)
             
             # Insert the state into the database
             try:
@@ -565,7 +580,8 @@ def qweli_agent_RAG(state: MainState) -> MainState:
        provide a professional answer to the user's query.
     2. Cite your sources based on the metadata provided. Use the file name or URL as the source.
     3. Format your response as follows: "Answer text. Source: [file name or URL]"
-    4. If multiple sources are used, cite each one separately.
+    4. If multiple sources are used, cite each one separately, however check and ensure that there is no repetition of sources.
+    5. Do not start your response with "Based on the information provided", or "Answer*" : Just give the answer.
     5. Do not make up any information.
     6. If the documents do not contain sufficient information to answer the query, state that clearly.
     7. Present your answer in a well-formatted markdown style.

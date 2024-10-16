@@ -14,7 +14,7 @@ def get_postgres_connection(dbname: str, table_name: str):
     :param table_name: Name of the table to interact with
     :return: Connection object
     """
-    db_host = "www.sema-ai.com"
+    db_host = "localhost"#"www.sema-ai.com"
     db_user = "postgres"
     db_password = "wes@1234"
 

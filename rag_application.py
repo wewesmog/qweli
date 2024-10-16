@@ -14,6 +14,9 @@ from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolExecutor
 from psycopg2.extras import Json
 from google.generativeai import GenerativeModel
+from nomic import embed
+import numpy as np
+from openai import OpenAI
 
 
 # Load environment variables
@@ -66,7 +69,7 @@ class MainState(TypedDict):
     similar_questions: List[str]
 
 # Helper functions
-def call_gemini_api1(messages: List[Dict[str, str]]) -> str:
+def call_llm_api1(messages: List[Dict[str, str]]) -> str:
     try:
         # Create the model
         model = genai.GenerativeModel('gemini-pro')
@@ -91,7 +94,7 @@ def call_gemini_api1(messages: List[Dict[str, str]]) -> str:
         logger.error(f"Error calling Gemini API: {e}")
         return ""
 
-def call_gemini_api(messages: List[Dict[str, str]]) -> str:
+def call_llm_api(messages: List[Dict[str, str]]) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
@@ -108,12 +111,58 @@ def call_gemini_api(messages: List[Dict[str, str]]) -> str:
     except Exception as e:
         logger.error(f"Error calling OpenRouter API: {e}")
         return ""
+# Initialize the OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+#  gpt-3.5-turbo #gpt-4o-2024-08-06 #GPT-4o mini
+def call_embedding_api(text: str, model: str = "text-embedding-ada-002") -> List[float]:
+    """
+    Make a call to the OpenAI API for text embeddings.
+    
+    :param text: The text to embed
+    :param model: The model to use for the embedding
+    :return: The embedding as a list of floats
+    """
+    try:
+        response = client.embeddings.create(
+            model=model,
+            input=text
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        # Log the error and re-raise it to be handled by the calling function
+        print(f"Error in OpenAI Embedding API call: {e}")
 
+# Initialize the OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+#  gpt-3.5-turbo #gpt-4o-2024-08-06 #GPT-4o mini
+def call_openai_api(messages: List[Dict[str, str]], model: str = "gpt-3.5-turbo", max_tokens: int = 2000, temperature: float = 0.3) -> Any:
+    """
+    Make a call to the OpenAI API for chat completions.
+    
+    :param messages: List of message dictionaries to send to the API
+    :param model: The model to use for the API call
+    :param max_tokens: Maximum number of tokens in the response
+    :param temperature: Controls randomness in the response
+    :return: The API response
+    """
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        # Log the error and re-raise it to be handled by the calling function
+        print(f"Error in OpenAI API call: {e}")
+        raise
+        raise
 
 import re
 import json
 
-def call_gemini_api1(messages: List[Dict[str, str]]) -> str:
+def call_llm_api1(messages: List[Dict[str, str]]) -> str:
     url = "http://localhost:11434/api/chat"
     headers = {
         "Content-Type": "application/json"
@@ -164,7 +213,7 @@ def get_postgres_connection(table_name: str):
     db_user = os.getenv("DB_USER", "").strip()
     db_password = os.getenv("DB_PASSWORD", "").strip()
     db_port = os.getenv("DB_PORT", "5432").strip()
-    db_name = os.getenv("DB_NAME", "postgres").strip()
+    db_name = "postgres" #os.getenv("DB_NAME", "postgres").strip()
 
     try:
         conn = psycopg2.connect(
@@ -183,9 +232,9 @@ def get_postgres_connection(table_name: str):
         logger.error(f"An unexpected error occurred: {e}")
         raise
 
-def generate_gemini_embedding(text: str) -> List[float]:
+def generate_nomic_embedding(text: str) -> List[float]:
     """
-    Generate an embedding for the given text using the Gemini API.
+    Generate an embedding for the given text using the Nomic API.
     
     Args:
     text (str): The input text to embed.
@@ -193,14 +242,18 @@ def generate_gemini_embedding(text: str) -> List[float]:
     Returns:
     list: The embedding vector as a list of floats.
     """
-    model = 'models/embedding-001'
     try:
-        embedding = genai.embed_content(model=model,
-                                        content=text,
-                                        task_type="retrieval_document")
-        return embedding['embedding']  # This is already a list
+        output = embed.text(
+            texts=[text],
+            model='nomic-embed-text-v1.5',
+            task_type="search_document",
+            dimensionality=256,
+        )
+        # The output is a numpy array, so we convert it to a list
+        embedding = output[0].tolist()
+        return embedding
     except Exception as e:
-        logger.error(f"Error generating Gemini embedding: {e}")
+        logger.error(f"Error generating Nomic embedding: {e}")
         return []
 
 #Main Functions
@@ -225,7 +278,7 @@ def handle_user_input(state: MainState) -> MainState:
     2. Determine if the input is a **chitchat** (e.g., greetings, personal questions like "What is your name?", "How are you?", or other social interactions). For this, select the **chitchat** tool.
     3. If the input is related to specific services, products, or information (like details about KCB products), select the **RAG** tool.
     4. Chitchat examples include: "Hello", "How are you?", "What is your name?", "What's the weather like?", "tell me a joke" etc.
-    5. If it is a chitchat query, respond appropriately and update the user with the response.
+    5. If it is a chitchat query, respond appropriately and update the parameters field with the response.
         Examples of chitchat responses include: "Hello! How can I assist you today?", "I'm Qweli, your virtual assistant. How may I help you?", "Nice to meet you! How can I assist you today?", "I'm here to help you with any questions you have. What's on your mind?"
     6. Use **chitchat** to ask for clarifications if the user's query is unclear.
     7. Ensure that you provide the required parameters & justification for the tool selected.
@@ -262,7 +315,7 @@ def handle_user_input(state: MainState) -> MainState:
     ]
 
     try:
-        llm_response = call_gemini_api(messages)
+        llm_response = call_llm_api(messages)
         logger.debug(f"LLM response: {llm_response}")
         
         llm_response = json.loads(llm_response)
@@ -358,7 +411,7 @@ def refine_query_for_RAG(state: MainState) -> MainState:
     ]
 
     try:
-        llm_response = call_gemini_api(messages)
+        llm_response = call_llm_api(messages)
         llm_response = json.loads(llm_response)
         
         state["comprehensive_query"] = llm_response.get("comprehensive_query", user_query)
@@ -382,7 +435,7 @@ def retrieval(state: MainState) -> MainState:
     logger.info(f"Similar questions: {similar_questions}")
 
     all_documents = []
-    table_name = "public.faq"
+    table_name = "public.world_bank_report"
     
     try:
         conn = get_postgres_connection(table_name)
@@ -392,7 +445,7 @@ def retrieval(state: MainState) -> MainState:
         
         for query in queries:
             try:
-                embedding = generate_gemini_embedding(query)
+                embedding = call_embedding_api(query)  # Use your existing embedding function
                 
                 if not embedding:
                     logger.warning(f"Failed to generate embedding for query: {query}")
@@ -401,30 +454,34 @@ def retrieval(state: MainState) -> MainState:
                 embedding_str = '[' + ','.join(map(str, embedding)) + ']'
                 with conn.cursor() as cur:
                     cur.execute("""
-                        SELECT id, content, metadata, 1 - (embeddings <=> %s::vector) AS similarity
-                        FROM public.faq
+                        SELECT id, 
+                               'Document Title: World Bank Report 2023, Page:' || left_page || '_' || right_page AS metadata, "content",
+                               1 - (embeddings <=> %s::vector) AS similarity
+                        FROM public.world_bank_report
                         WHERE 1 - (embeddings <=> %s::vector) >= %s
                         ORDER BY similarity DESC
                         LIMIT %s
-                    """, (embedding_str, embedding_str, 0.7, 6))
+                    """, (embedding_str, embedding_str, 0.7, 3))
                     
                     rows = cur.fetchall()
                     
                     for row in rows:
                         document = {
                             "id": row[0],
-                            "content": row[1],
-                            "metadata": row[2] if row[2] else {},
+                            "metadata": row[1],
+                            "content": row[2],
                             "similarity": float(row[3])
                         }
                         all_documents.append(document)
 
             except Exception as e:
                 logger.error(f"Error processing query '{query}': {e}")
+                logger.error(f"Full error details: {str(e)}")
                 # Continue with the next query
 
     except Exception as e:
         logger.error(f"Error during document retrieval: {e}")
+        logger.error(f"Full error details: {str(e)}")
         # If there's any error, we'll just return an empty list for documents
     
     finally:
@@ -459,13 +516,13 @@ def check_document_relevance(state: MainState) -> MainState:
         And the following document content:
         Document: "{doc_content}"
 
-        Carefully analyze whether this document satisfactorily answers the comprehensive query. Emsure that it covers the subject of 
-        the query. For example, if the query is about KCB KOPA float, the document should talk about KOPA float. Consider the following:
-        1. Does the document contribute to answering the comprehensive query?
-        2. Does the document directly address the main points of the query?
-        2. Is the information in the document sufficient to provide a complete answer?
-        3. Is the content relevant and on-topic?
-        4. Does it provide any unique insights or important details related to the query?
+        Analyze whether this document provides useful information related to the comprehensive query. Consider the following:
+        1. Does the document contribute to answering at least 20% of the comprehensive query?
+        2. Does the document address any main points or subtopics of the query?
+        3. Is the content relevant to the query topic?
+        4. Does it provide any insights or details that could be helpful in formulating a response?
+
+        Even if the document doesn't fully answer the query, respond with "Yes" if it covers at least 20% of the query or provides significant relevant information. Otherwise, respond with "No".
 
         After your analysis, respond with only "Yes" or "No".
         """
@@ -476,7 +533,7 @@ def check_document_relevance(state: MainState) -> MainState:
         ]
 
         try:
-            llm_response = call_gemini_api(messages)
+            llm_response = call_llm_api(messages)
             document["answers_query"] = "Yes" if "yes" in llm_response.strip().lower() else "No"
         except Exception as e:
             logger.error(f"Error analyzing document ID {document.get('id', 'unknown')}: {e}")
@@ -501,11 +558,13 @@ def check_tavily_relevance(state: MainState) -> MainState:
         And the following Tavily search result:
         Result: "{result_content}"
 
-        Carefully analyze whether this search result satisfactorily answers the comprehensive query. Consider the following:
-        1. Does the result directly address the main points of the query?
-        2. Is the information in the result sufficient to provide a complete answer?
-        3. Is the content relevant and on-topic?
-        4. Does it provide any unique insights or important details related to the query?
+        Analyze whether this document provides useful information related to the comprehensive query. Consider the following:
+        1. Does the document contribute to answering at least 20% of the comprehensive query?
+        2. Does the document address any main points or subtopics of the query?
+        3. Is the content relevant to the query topic?
+        4. Does it provide any insights or details that could be helpful in formulating a response?
+
+        Even if the document doesn't fully answer the query, respond with "Yes" if it covers at least 20% of the query or provides significant relevant information. Otherwise, respond with "No".
 
         After your analysis, respond with only "Yes" or "No".
         """
@@ -516,7 +575,7 @@ def check_tavily_relevance(state: MainState) -> MainState:
         ]
 
         try:
-            llm_response = call_gemini_api(messages)
+            llm_response = call_llm_api(messages)
             result["answers_query"] = "Yes" if "yes" in llm_response.strip().lower() else "No"
         except Exception as e:
             logger.error(f"Error analyzing Tavily result: {e}")
@@ -539,7 +598,7 @@ def search_with_tavily(state: MainState) -> MainState:
                 query=query,
                 search_depth="advanced",
                 max_results=5,
-                include_domains=["https://ke.kcbgroup.com/"]
+                include_domains=["https://www.worldbank.org/en/home"]
             )
             all_results.extend(search_result.get('results', []))
         except Exception as e:
@@ -593,7 +652,7 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     ]
 
     try:
-        llm_response = call_gemini_api(messages)
+        llm_response = call_llm_api(messages)
         state["qweli_response"] = llm_response.strip()
         logger.info(f"Qweli response generated: {state['qweli_response'][:100]}...")  # Log first 100 chars
     except Exception as e:
@@ -642,10 +701,11 @@ def create_graph():
     workflow.add_edge(START, "handle_user_input")
     workflow.add_conditional_edges(
         "handle_user_input",
-        lambda x: "refine_query_for_RAG" if any(tool["name"] == "RAG" for tool in x.get("selected_tools", [])) else END,
+        lambda x: "refine_query_for_RAG" if x.get("selected_tool", {}).get("name") == "RAG" else END,
         {
             "refine_query_for_RAG": "refine_query_for_RAG",
-            END: END
+            "END": END
+        
         }
     )
     workflow.add_edge("refine_query_for_RAG", "retrieval")
@@ -680,7 +740,7 @@ def create_graph():
     return workflow
 
 
-def get_conversation_history(user_id: str, limit: int = 5) -> List[Dict[str, str]]:
+def get_conversation_history(user_id: str, limit: int = 15) -> List[Dict[str, str]]:
     logger.info(f"Fetching conversation history for user: {user_id}")
     conn = get_postgres_connection("respond_to_human")  # Changed this line
     
@@ -714,10 +774,10 @@ def get_conversation_history(user_id: str, limit: int = 5) -> List[Dict[str, str
 def main():
     logger.info("Starting main function")
     # Create sample inputs
-    user_id = "test_user"
+    user_id = "test_user_6"
     session_id = "test_session"
     conversation_id = "test_conversation"
-    user_input = "tell me a bank joke"
+    user_input = "Tell me any interesting facts about Ghana?"
 
     # Fetch conversation history from the database
     conversation_history = get_conversation_history(user_id)
@@ -726,8 +786,7 @@ def main():
     if not conversation_history:
         logger.info("No conversation history found, using default starter")
         conversation_history = [
-            "human: Hello, I have a question about KCB services.",
-            "AI: Hello! I'd be happy to help you with any questions you have about KCB services. What would you like to know?"
+            
         ]
 
     sample_input = {

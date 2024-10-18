@@ -94,7 +94,7 @@ def call_llm_api1(messages: List[Dict[str, str]]) -> str:
         logger.error(f"Error calling Gemini API: {e}")
         return ""
 
-def call_llm_api(messages: List[Dict[str, str]]) -> str:
+def call_llm_api1(messages: List[Dict[str, str]]) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
@@ -135,7 +135,7 @@ def call_embedding_api(text: str, model: str = "text-embedding-ada-002") -> List
 # Initialize the OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 #  gpt-3.5-turbo #gpt-4o-2024-08-06 #GPT-4o mini
-def call_openai_api(messages: List[Dict[str, str]], model: str = "gpt-3.5-turbo", max_tokens: int = 2000, temperature: float = 0.3) -> Any:
+def call_llm_api(messages: List[Dict[str, str]], model: str = "gpt-3.5-turbo", max_tokens: int = 2000, temperature: float = 0.3) -> Any:
     """
     Make a call to the OpenAI API for chat completions.
     
@@ -276,12 +276,13 @@ def handle_user_input(state: MainState) -> MainState:
 
     1. Carefully analyze the user input and conversation history to select the appropriate tool. You can only select one tool.
     2. Determine if the input is a **chitchat** (e.g., greetings, personal questions like "What is your name?", "How are you?", or other social interactions). For this, select the **chitchat** tool.
-    3. If the input is related to specific services, products, or information (like details about KCB products), select the **RAG** tool.
-    4. Chitchat examples include: "Hello", "How are you?", "What is your name?", "What's the weather like?", "tell me a joke" etc.
+    3. If the input is related to specific services, products, or information (including details about loans, banking services, or financial products), select the **RAG** tool.
+    4. Chitchat examples are strictly limited to: "Hello", "How are you?", "What is your name?", "What's the weather like?", "Tell me a joke".
     5. If it is a chitchat query, respond appropriately and update the parameters field with the response.
         Examples of chitchat responses include: "Hello! How can I assist you today?", "I'm Qweli, your virtual assistant. How may I help you?", "Nice to meet you! How can I assist you today?", "I'm here to help you with any questions you have. What's on your mind?"
-    6. Use **chitchat** to ask for clarifications if the user's query is unclear.
-    7. Ensure that you provide the required parameters & justification for the tool selected.
+    6. Use **chitchat** to ask for clarifications only if the user's query is completely unrelated to any banking or financial topics.
+    7. When in doubt, always select RAG. Only select chitchat for the most obvious and basic social interactions.
+    8. Ensure that you provide the required parameters & justification for the tool selected.
 
     Expected format if the tool selected is RAG:
     {{
@@ -406,7 +407,7 @@ def refine_query_for_RAG(state: MainState) -> MainState:
     """
 
     messages = [
-        {"role": "system", "content": "You are a helpful assistant that refines user queries based on conversation history and generates similar questions for wider recall."},
+        {"role": "system", "content": "You are a helpful assistant in Swiftcash bank that refines user queries based on conversation history and generates similar questions for wider recall."},
         {"role": "user", "content": prompt}
     ]
 
@@ -428,7 +429,7 @@ def refine_query_for_RAG(state: MainState) -> MainState:
 
 def retrieval(state: MainState) -> MainState:
     logger.info("Starting document retrieval")
-    comprehensive_query = state.get("comprehensive_query", "")
+    comprehensive_query = state.get("comprehensive_query", ""); 
     similar_questions = state.get("similar_questions", [])
 
     logger.info(f"Comprehensive query: {comprehensive_query}")
@@ -457,15 +458,16 @@ def retrieval(state: MainState) -> MainState:
                         SELECT id, 
                                json_build_object(
                                    'title', 'Swiftcash Bank Documentation',
-                                   'page', CONCAT(left_page, '_', right_page)
+                                   'page', "metadata"
                                )::jsonb AS metadata,
                                content,
                                1 - (embeddings <=> %s::vector) AS similarity
-                        FROM public.world_bank_report
+                        FROM public.swiftcash
                         WHERE 1 - (embeddings <=> %s::vector) >= %s
                         ORDER BY similarity DESC
                         LIMIT %s
                     """, (embedding_str, embedding_str, 0.7, 3))
+                    
                     
                     rows = cur.fetchall()
                     
@@ -532,7 +534,7 @@ def check_document_relevance(state: MainState) -> MainState:
         """
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant tasked with analyzing document relevance."},
+            {"role": "system", "content": "You are a helpful assistant in Swiftcash bank tasked with analyzing document relevance."},
             {"role": "user", "content": prompt}
         ]
 
@@ -628,8 +630,7 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     relevant_documents = [doc for doc in relevant_documents if doc.get("answers_query") == "Yes"]
     
     if not relevant_documents:
-        state["qweli_response"] = "I apologize, but after searching our documents and the web, I couldn't find a relevant answer to your query. Could you please rephrase your question or provide more details?"
-        return state
+        state["qweli_response"] = "I apologize, but after searching our documents, I couldn't find a relevant answer to your query. Could you please rephrase your question or provide more details?"
 
     prompt = f"""
     User Query: "{state['user_input']}"
@@ -640,7 +641,7 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     Relevant Documents:
     {json.dumps(relevant_documents, indent=2)}
     1. Using the information from the relevant documents and considering the conversation history, 
-       provide a professional answer to the user's query.
+       provide a professional & comprehensive answer to the user's query.
     2. Cite your sources based on the metadata provided. Use the file name or URL as the source.
     3. Format your response as follows: "Answer text. Source: [file name or URL]"
     4. If multiple sources are used, cite each one separately, however check and ensure that there is no repetition of sources.
@@ -651,7 +652,7 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     """
 
     messages = [
-        {"role": "system", "content": "You are Qweli, a professional assistant tasked with answering user queries based on provided documents and conversation history. Your responses should be accurate, concise, well-formatted in markdown style, and include source citations."},
+        {"role": "system", "content": "You are Qweli, a professional assistant in Swiftcash bank, a single source of truth for all staff.You are tasked with answering user queries based on provided documents and conversation history. Your responses should be accurate, concise, well-formatted in markdown style, and include source citations."},
         {"role": "user", "content": prompt}
     ]
 
@@ -713,15 +714,39 @@ def create_graph():
         }
     )
     workflow.add_edge("refine_query_for_RAG", "retrieval")
+    """
     workflow.add_conditional_edges(
         "retrieval",
-        lambda x: "check_document_relevance" if x["documents"] else "qweli_agent_RAG",
+        lambda x: "check_document_relevance" if x["documents"] else "search_with_tavily",
         {
             "check_document_relevance": "check_document_relevance",
+            "search_with_tavily": "search_with_tavily"
+        }
+    )"""
+
+    workflow.add_edge("retrieval", "check_document_relevance")
+    workflow.add_edge("check_document_relevance", "qweli_agent_RAG")
+    #workflow.add_edge("qweli_agent_RAG", END)
+
+    """workflow.add_conditional_edges(
+        "check_document_relevance",
+        lambda x: "qweli_agent_RAG" if x["documents"] else "search_with_tavily",
+        {
+            "search_with_tavily": "search_with_tavily",
             "qweli_agent_RAG": "qweli_agent_RAG"
         }
     )
-    workflow.add_edge("check_document_relevance", "qweli_agent_RAG")
+    
+    workflow.add_conditional_edges(
+        "search_with_tavily",
+        lambda x: "check_tavily_relevance" if x["tavily_results"] else "qweli_agent_RAG",
+        {
+            "check_tavily_relevance": "check_tavily_relevance",
+            "qweli_agent_RAG": "qweli_agent_RAG"
+        }
+    )
+    workflow.add_edge("check_tavily_relevance", "qweli_agent_RAG")
+    """
     workflow.add_edge("qweli_agent_RAG", END)
 
     return workflow
@@ -758,58 +783,8 @@ def get_conversation_history(user_id: str, limit: int = 15) -> List[Dict[str, st
     finally:
         conn.close()
 
-def main():
-    logger.info("Starting main function")
-    # Create sample inputs
-    user_id = "test_user_60"
-    session_id = "test_session"
-    conversation_id = "test_conversation"
-    user_input = "hello?"
-
-    # Fetch conversation history from the database
-    conversation_history = get_conversation_history(user_id)
-
-    # If no history is found, use a default starter
-    if not conversation_history:
-        logger.info("No conversation history found, using default starter")
-        conversation_history = [
-            
-        ]
-
-    sample_input = {
-        "user_id": user_id,
-        "session_id": session_id,
-        "conversation_id": conversation_id,
-        "user_input": user_input,
-        "conversation_history": conversation_history
-    }
-
-    logger.info(f"Sample input prepared: {sample_input}")
-
-    # Create the workflow
-    rag_workflow = create_graph()
-    logger.info("Workflow graph created")
-
-    # Compile the workflow
-    app = rag_workflow.compile()
-    logger.info("Workflow compiled")
-
-    # Run the workflow with sample input
-    logger.info("Starting workflow execution")
-    for output in app.stream(sample_input):
-        logger.info(f"Intermediate output: {output}")
-        if output.get("end"):
-            break
-
-    # Get the final result (last item from the stream)
-    final_output = output
-    #qweli_response = final_output['qweli_response']
-    # Print the final result
-    logger.info("Workflow execution completed")
-    logger.info(f"Final Workflow Result: {final_output}")
-
-
+        
 if __name__ == "__main__":
-    main()
-    # The line below is commented out, likely for debugging purposes
-    # print(final_output["qweli_response"])
+    # This block will only run if qweli.py is executed directly
+    graph = create_graph()
+    # Add any other initialization or testing code here

@@ -204,6 +204,7 @@ def call_llm_api1(messages: List[Dict[str, str]]) -> str:
 
 def get_postgres_connection(table_name: str):
     """
+    
     Establish and return a connection to the PostgreSQL database.
     
     :param table_name: Name of the table to interact with

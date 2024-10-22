@@ -631,6 +631,8 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     
     if not relevant_documents:
         state["qweli_response"] = "I apologize, but after searching our documents, I couldn't find a relevant answer to your query. Could you please rephrase your question or provide more details?"
+        state["suggested_question"] = ""
+        return state
 
     prompt = f"""
     User Query: "{state['user_input']}"
@@ -640,31 +642,45 @@ def qweli_agent_RAG(state: MainState) -> MainState:
 
     Relevant Documents:
     {json.dumps(relevant_documents, indent=2)}
+
+    Instructions:
     1. Using the information from the relevant documents and considering the conversation history, 
        provide a professional & comprehensive answer to the user's query.
     2. Cite your sources based on the metadata provided. Use the file name or URL as the source.
-    3. Format your response as follows: "Answer text. Source: [file name or URL]"
-    4. If multiple sources are used, cite each one separately, however check and ensure that there is no repetition of sources.
-    5. Do not start your response with "Based on the information provided", or "Answer*" : Just give the answer.
+    3. If multiple sources are used, cite each one separately, however check and ensure that there is no repetition of sources.
+    4. Do not start your response with "Based on the information provided", or "Answer*" : Just give the answer.
     5. Do not make up any information.
     6. If the documents do not contain sufficient information to answer the query, state that clearly.
     7. Present your answer in a well-formatted markdown style.
+    8. After providing the answer, suggest a logical follow-up question that a customer might ask based on the information provided.
+    9. Format your response as a JSON object with two fields: "answer" and "suggested_question".
+
+    Example format:
+    {{
+        "answer": "Your comprehensive answer here, with proper citations and markdown formatting.",
+        "suggested_question": "A logical follow-up question based on the provided answer."
+    }}
     """
 
     messages = [
-        {"role": "system", "content": "You are Qweli, a professional assistant in Swiftcash bank, a single source of truth for all staff.You are tasked with answering user queries based on provided documents and conversation history. Your responses should be accurate, concise, well-formatted in markdown style, and include source citations."},
+        {"role": "system", "content": "You are Qweli, a professional assistant in Swiftcash bank, a single source of truth for all staff. You are tasked with answering user queries based on provided documents and conversation history. Your responses should be accurate, concise, well-formatted in markdown style, and include source citations."},
         {"role": "user", "content": prompt}
     ]
 
     try:
         llm_response = call_llm_api(messages)
-        state["qweli_response"] = llm_response.strip()
-        logger.info(f"Qweli response generated: {state['qweli_response'][:100]}...")  # Log first 100 chars
+        response_data = json.loads(llm_response.strip())
+        
+        state["qweli_response"] = response_data["answer"]
+        state["suggested_question"] = response_data["suggested_question"]
+        
+        logger.info(f"Qweli response generated: {state['qweli_response'][:100]}...")
+        logger.info(f"Suggested question generated: {state['suggested_question']}")
     except Exception as e:
         logger.error(f"Error in Qweli agent: {e}")
         state["qweli_response"] = "I apologize, but I encountered an error while processing your query. Please try again later."
+        state["suggested_question"] = ""
     
-    print(f"Final Qweli response: {state['qweli_response']}")
     # Update conversation history
     state["conversation_history"].append({"role": "assistant", "content": state["qweli_response"]})
 

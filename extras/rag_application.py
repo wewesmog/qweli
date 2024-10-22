@@ -94,7 +94,7 @@ def call_llm_api1(messages: List[Dict[str, str]]) -> str:
         logger.error(f"Error calling Gemini API: {e}")
         return ""
 
-def call_llm_api(messages: List[Dict[str, str]]) -> str:
+def call_llm_api_openrouter(messages: List[Dict[str, str]]) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
@@ -135,7 +135,7 @@ def call_embedding_api(text: str, model: str = "text-embedding-ada-002") -> List
 # Initialize the OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 #  gpt-3.5-turbo #gpt-4o-2024-08-06 #GPT-4o mini
-def call_openai_api(messages: List[Dict[str, str]], model: str = "gpt-3.5-turbo", max_tokens: int = 2000, temperature: float = 0.3) -> Any:
+def call_llm_api(messages: List[Dict[str, str]], model: str = "GPT-4o mini", max_tokens: int = 2000, temperature: float = 0.3) -> Any:
     """
     Make a call to the OpenAI API for chat completions.
     

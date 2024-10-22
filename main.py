@@ -5,11 +5,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from backend.qweli import create_graph, get_postgres_connection
+from backend.initial_questions import initial_questions  # Import the questions
 import uvicorn
 import logging
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
+import random
 
 # Load environment variables
 load_dotenv()
@@ -45,6 +47,7 @@ class ChatInput(BaseModel):
 
 class ChatResponse(BaseModel):
     qweli_response: str
+    suggested_question: str
 
 def get_postgres_connection():
     try:
@@ -117,27 +120,44 @@ async def chat(request: Request):
         final_output = output
     logger.info("Workflow stream completed")
 
-    # Extract Qweli's response
+    # Extract Qweli's response and suggested question
     qweli_response = None
+    suggested_question = None
     if final_output and isinstance(final_output, dict):
-        # Check all nodes for qweli_response
+        # Check all nodes for qweli_response and suggested_question
         for node_output in final_output.values():
-            if isinstance(node_output, dict) and 'qweli_response' in node_output:
-                qweli_response = node_output['qweli_response']
-                break
-            
-            # If not found in node outputs, check top level
-            if qweli_response is None and 'qweli_response' in final_output:
-                qweli_response = final_output['qweli_response']
+            if isinstance(node_output, dict):
+                if 'qweli_response' in node_output:
+                    qweli_response = node_output['qweli_response']
+                if 'suggested_question' in node_output:
+                    suggested_question = node_output['suggested_question']
+                if qweli_response and suggested_question:
+                    break
+        
+        # If not found in node outputs, check top level
+        if qweli_response is None and 'qweli_response' in final_output:
+            qweli_response = final_output['qweli_response']
+        if suggested_question is None and 'suggested_question' in final_output:
+            suggested_question = final_output['suggested_question']
 
     if qweli_response is None:
         logger.error(f"No qweli_response found in final output. Final output: {final_output}")
         qweli_response = "Sorry, I couldn't generate a response."
 
+    # If suggested_question is empty or not in response, get a random one from initial_questions
+    if not suggested_question:
+        suggested_question = random.choice(initial_questions)
+
     logger.info(f"Final Qweli response: {qweli_response}")
+    logger.info(f"Suggested question: {suggested_question}")
 
     # Return the response
-    return JSONResponse(content={"qweli_response": qweli_response})
+    response_content = {
+        "qweli_response": qweli_response,
+        "suggested_question": suggested_question
+    }
+    logger.info(f"Sending response to frontend: {response_content}")
+    return JSONResponse(content=response_content)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

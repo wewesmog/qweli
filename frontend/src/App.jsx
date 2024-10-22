@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import { assets } from './assets/assets.js';
 import { useSelector, useDispatch } from 'react-redux';
@@ -11,6 +11,7 @@ import {
   updateHistory,
 } from './features/promptSlice.js';
 import ReactMarkdown from 'react-markdown';
+import { dynamicQuestions } from './initialQuestions.js';
 
 function App() {
   const [input, setInput] = useState('');
@@ -18,6 +19,8 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState(null); // New state for session ID
   const bottomRef = useRef(null);
+  const [suggestedQuestion, setSuggestedQuestion] = useState('');
+  const [currentQuestions, setCurrentQuestions] = useState([]);
 
   const allHistory = useSelector((state) => state.prompt.historyArr);
   const newChat = useSelector((state) => state.prompt.newChat);
@@ -53,8 +56,8 @@ function App() {
 
   useEffect(() => {
     handleAllHistory();
-    // Start a new session when the app loads
     startNewSession();
+    initializeQuestions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -66,10 +69,36 @@ function App() {
       const data = await response.json();
       setSessionId(data.session_id);
       console.log('New session started with ID:', data.session_id);
+      initializeQuestions(); // Call initializeQuestions here
     } catch (error) {
       console.error('Error starting session:', error);
     }
   };
+
+  const initializeQuestions = () => {
+    console.log('Initializing questions...');
+    const shuffled = [...dynamicQuestions].sort(() => 0.5 - Math.random());
+    console.log('Shuffled questions:', shuffled);
+    setCurrentQuestions(shuffled.slice(0, 10)); // Set 10 questions for the session
+  };
+
+  const setRandomQuestion = useCallback(() => {
+    console.log('Setting random question...');
+    if (currentQuestions.length > 0) {
+      const randomIndex = Math.floor(Math.random() * currentQuestions.length);
+      const newQuestion = currentQuestions[randomIndex];
+      console.log('New suggested question:', newQuestion);
+      setSuggestedQuestion(newQuestion);
+    } else {
+      console.log('No current questions available');
+    }
+  }, [currentQuestions]);
+
+  useEffect(() => {
+    if (currentQuestions.length > 0) {
+      setRandomQuestion();
+    }
+  }, [currentQuestions, setRandomQuestion]);
 
   function jsonEscape(str) {
     str = str.split('*').join('<br>');
@@ -114,13 +143,20 @@ function App() {
     console.log("Conversation history updated:", conversationHistory);
   }, [conversationHistory]);
 
+  useEffect(() => {
+    if (bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [conversationHistory]);
+
   const handleRun = async () => {
-    if (input !== "" && sessionId) {
-      setLoading(true); // Set loading to true before API call
-      const userMessage = { role: "user", parts: [{ text: input }] };
-      setConversationHistory(prev => [...prev, userMessage]);
+    if (input !== '' && sessionId) {
+      setSuggestedQuestion(''); // Clear the current suggested question
+      const userMessage = { role: 'user', parts: [{ text: input }] };
+      setConversationHistory((prev) => [...prev, userMessage]);
       let prompt = input;
-      setInput("");
+      setInput('');
+      setLoading(true);
 
       try {
         const response = await fetch('http://localhost:8000/api/chat', {
@@ -140,35 +176,42 @@ function App() {
         }
 
         const data = await response.json();
-        console.log("Received response from backend:", data);
+        setLoading(false);
 
-        if (data.qweli_response) {
-          const formattedResponse = data.qweli_response.replace(/\\n/g, '\n');
-          const botMessage = { role: "model", parts: [{ text: formattedResponse }] };
-          setConversationHistory(prevHistory => [...prevHistory, botMessage]);
-        } else {
-          console.error("Unexpected response format:", data);
+        const botMessage = { role: 'model', parts: [{ text: data.qweli_response }] };
+        setConversationHistory((prevHistory) => [...prevHistory, botMessage]);
+
+        // Set the new suggested question from the backend
+        setSuggestedQuestion(data.suggested_question);
+
+        if (conversationHistory.length > 1) {
+          handleUpdate(conversationHistory);
         }
       } catch (error) {
         console.error('Error:', error);
-        const errorMessage = { role: "model", parts: [{ text: 'Sorry, there was an error processing your request.' }] };
-        setConversationHistory(prevHistory => [...prevHistory, errorMessage]);
-      } finally {
-        setLoading(false); // Set loading to false after API call, whether it succeeded or failed
+        setLoading(false);
+        const errorMessage = { role: 'model', parts: [{ text: 'Sorry, there was an error processing your request.' }] };
+        setConversationHistory((prevHistory) => [...prevHistory, errorMessage]);
+        setSuggestedQuestion(''); // Clear suggested question on error
       }
     }
   };
 
+
   return (
     <div className="App">
       <div className="top">
-        <span className="title">Marara</span>
+        <span className="title">Qweli</span>
         <img src={assets.user_icon} className="userIcon" alt="User Icon" />
       </div>
       <div className={conversationHistory.length === 0 ? "midContainer" : "chatContainer"}>
         {conversationHistory.length !== 0 ? (
           conversationHistory.map((convo, index) => (
-            <div className="chat" key={index}>
+            <div 
+              className="chat" 
+              key={index}
+              ref={index === conversationHistory.length - 1 ? bottomRef : null}
+            >
               {convo.role === "user" ? <img src={assets.user_icon} className='chatImg' alt="" /> : <img src={assets.gemini_icon} className='chatImg gemImg' alt="" />}
               <span className={index % 2 !== 0 ? "chatText lighter" : "chatText"}>
                 <ReactMarkdown>{convo.parts[0]?.text || ''}</ReactMarkdown>
@@ -178,10 +221,9 @@ function App() {
         ) : (
           <>
             <div className="greet">
-              <span className="colorGreet">Welcome to Marara</span>
+              <span className="colorGreet">Welcome to Qweli</span>
               <span>Your Single Source of Truth.</span>
             </div>
-            
           </>
         )}
         {loading && (
@@ -196,13 +238,13 @@ function App() {
         )}
       </div>
       <div className="Footer">
-        <div className="sgTxt">
-          <button className="sgBtn"
-          onClick={() => setInput('Can you explain what VOOMA is and how it works?')}
-          >
-          <span>While Marara strives for accuracy, please always countercheck information provided. Marara may not always get it right.While Marara strives for accuracy, please always countercheck information provided. Marara may not always get it rightWhile Marara strives for accuracy, please always countercheck information provided. Marara may not always get it rightWhile Marara strives for accuracy, please always countercheck information provided. Marara may not always get it rightWhile Marara strives for accuracy, please always countercheck information provided. Marara may not always get it right</span>
-          </button>
-        </div>
+        {suggestedQuestion && (
+          <div className="sgTxt">
+            <button className="sgBtn" onClick={() => setInput(suggestedQuestion)}>
+              <span>{suggestedQuestion}</span>
+            </button>
+          </div>
+        )}
         <div className="Search">
           <input
             type="text"
@@ -232,7 +274,7 @@ function App() {
           )}
         </div>
         <div className="info">
-          While Marara strives for accuracy, please always countercheck information provided. Marara may not always get it right.
+          While Qweli strives for accuracy, please always countercheck information provided. Qweli may not always get it right.
         </div>
       </div>
     </div>

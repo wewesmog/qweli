@@ -101,7 +101,8 @@ def call_llm_api1(messages: List[Dict[str, str]]) -> str:
         "Content-Type": "application/json"
     }
     data = {
-        "model": "openai/gpt-3.5-turbo-0613",  # You can change this to another model if needed
+        #"model": "openai/gpt-3.5-turbo-0613",  # You can change this to another model if needed
+        "model": "meta-llama/llama-3.1-8b-instruct",
         "messages": messages
     }
     try:
@@ -135,7 +136,7 @@ def call_embedding_api(text: str, model: str = "text-embedding-ada-002") -> List
 # Initialize the OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 #  gpt-3.5-turbo #gpt-4o-2024-08-06 #GPT-4o mini
-def call_llm_api(messages: List[Dict[str, str]], model: str = "gpt-3.5-turbo", max_tokens: int = 2000, temperature: float = 0.3) -> Any:
+def call_llm_api(messages: List[Dict[str, str]], model: str = "gpt-4o-mini", max_tokens: int = 2000, temperature: float = 0.3) -> Any:
     """
     Make a call to the OpenAI API for chat completions.
     
@@ -168,7 +169,7 @@ def call_llm_api1(messages: List[Dict[str, str]]) -> str:
         "Content-Type": "application/json"
     }
     data = {
-        "model": "llama3.2:1b-instruct-q6_K", #"llama3.2:1b", #"mistral:latest",
+        "model": "phi3:mini-4k", #"llama3.2:1b", #"mistral:latest",
         "messages": messages,
         "stream": False  # Set this to False to get a complete response
     }
@@ -176,7 +177,7 @@ def call_llm_api1(messages: List[Dict[str, str]]) -> str:
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
         response_json = response.json()
-        logger.debug(f"Ollama API response: {response_json}")
+        print(f"Ollama API response: {response_json}")
         if 'message' in response_json and 'content' in response_json['message']:
             content = response_json['message']['content']
             # Try to extract JSON-like content
@@ -186,20 +187,20 @@ def call_llm_api1(messages: List[Dict[str, str]]) -> str:
                     extracted_json = json.loads(json_match.group())
                     return json.dumps(extracted_json)
                 except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse extracted JSON: {json_match.group()}")
+                    print(f"Failed to parse extracted JSON: {json_match.group()}")
                     pass
             # If JSON extraction fails, return the raw content
-            logger.warning(f"Returning raw content: {content}")
+            print(f"Returning raw content: {content}")
             return content
         else:
-            logger.error(f"Unexpected response structure from Ollama API: {response_json}")
+            print(f"Unexpected response structure from Ollama API: {response_json}")
             return ""
     except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON from Ollama API: {e}")
-        logger.error(f"Raw response: {response.text}")
+        print(f"Error decoding JSON from Ollama API: {e}")
+        print(f"Raw response: {response.text}")
         return ""
     except requests.RequestException as e:
-        logger.error(f"Error calling Ollama API: {e}")
+        print(f"Error calling Ollama API: {e}")
         return ""
 
 def get_postgres_connection(table_name: str):
@@ -645,7 +646,7 @@ def qweli_agent_RAG(state: MainState) -> MainState:
 
     Instructions:
     1. Using the information from the relevant documents and considering the conversation history, 
-       provide a professional & comprehensive answer to the user's query.
+       provide a professional & comprehensive answer to the user's query as well as a suggested next question. 
     2. Cite your sources based on the metadata provided. Use the file name or URL as the source.
     3. If multiple sources are used, cite each one separately, however check and ensure that there is no repetition of sources.
     4. Do not start your response with "Based on the information provided", or "Answer*" : Just give the answer.
@@ -653,7 +654,7 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     6. If the documents do not contain sufficient information to answer the query, state that clearly.
     7. Present your answer in a well-formatted markdown style.
     8. After providing the answer, suggest a logical follow-up question that a customer might ask based on the information provided.
-    9. Format your response as a JSON object with two fields: "answer" and "suggested_question".
+    9. Format your response strictly as a JSON object with two fields: "answer" and "suggested_question".
 
     Example format:
     {{
@@ -663,12 +664,13 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     """
 
     messages = [
-        {"role": "system", "content": "You are Qweli, a professional assistant in Swiftcash bank, a single source of truth for all staff. You are tasked with answering user queries based on provided documents and conversation history. Your responses should be accurate, concise, well-formatted in markdown style, and include source citations."},
+        {"role": "system", "content": "You are Qweli, a professional assistant in Swiftcash bank, a single source of truth for all staff. You are tasked with answering user queries based on provided documents and conversation history & provide a suggested next question. Your responses should be accurate, concise, well-formatted in markdown style, and include source citations."},
         {"role": "user", "content": prompt}
     ]
 
     try:
         llm_response = call_llm_api(messages)
+        print(f"LLM response: {llm_response}")
         response_data = json.loads(llm_response.strip())
         
         state["qweli_response"] = response_data["answer"]
@@ -684,6 +686,7 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     # Update conversation history
     state["conversation_history"].append({"role": "assistant", "content": state["qweli_response"]})
 
+    print(f"State after Qweli agent: {state}")
     # Establish PostgreSQL connection
     table_name = "public.respond_to_human"
     conn = get_postgres_connection(table_name)  # Changed this line

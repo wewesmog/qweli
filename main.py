@@ -114,42 +114,24 @@ async def chat(request: Request):
 
     # Run the workflow
     final_output = None
-    logger.info("Starting workflow stream")
     for output in app_workflow.stream(workflow_input):
-        logger.info(f"Intermediate output: {output}")
         final_output = output
-    logger.info("Workflow stream completed")
-
+    print(f"Final output: {final_output}")
     # Extract Qweli's response and suggested question
-    qweli_response = None
-    suggested_question = None
+    default_response = "Sorry, I couldn't generate a response."
+    default_question = "What else would you like to know?"
+
+    qweli_response = default_response
+    suggested_question = default_question
+
     if final_output and isinstance(final_output, dict):
-        # Check all nodes for qweli_response and suggested_question
-        for node_output in final_output.values():
-            if isinstance(node_output, dict):
-                if 'qweli_response' in node_output:
-                    qweli_response = node_output['qweli_response']
-                if 'suggested_question' in node_output:
-                    suggested_question = node_output['suggested_question']
-                if qweli_response and suggested_question:
-                    break
-        
-        # If not found in node outputs, check top level
-        if qweli_response is None and 'qweli_response' in final_output:
-            qweli_response = final_output['qweli_response']
-        if suggested_question is None and 'suggested_question' in final_output:
-            suggested_question = final_output['suggested_question']
-
-    if qweli_response is None:
-        logger.error(f"No qweli_response found in final output. Final output: {final_output}")
-        qweli_response = "Sorry, I couldn't generate a response."
-
-    # If suggested_question is empty or not in response, get a random one from initial_questions
-    if not suggested_question:
-        suggested_question = random.choice(initial_questions)
+        qweli_agent_output = final_output.get('qweli_agent_RAG', {})
+        if isinstance(qweli_agent_output, dict):
+            qweli_response = qweli_agent_output.get('qweli_response', qweli_response)
+            suggested_question = qweli_agent_output.get('suggested_question', suggested_question)
 
     logger.info(f"Final Qweli response: {qweli_response}")
-    logger.info(f"Suggested question: {suggested_question}")
+    logger.info(f"Suggested question from Qweli agent: {suggested_question}")
 
     # Return the response
     response_content = {

@@ -22,3 +22,6 @@ __pycache__
 .env
 *.log
 __pycache__
+.env
+*.log
+__pycache__

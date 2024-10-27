@@ -8,13 +8,11 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 import psycopg2
 import requests
-from tavily import TavilyClient
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolExecutor
 from psycopg2.extras import Json
 from google.generativeai import GenerativeModel
-from nomic import embed
 import numpy as np
 from openai import OpenAI
 
@@ -28,7 +26,7 @@ if not google_api_key:
     raise ValueError("GOOGLE_API_KEY is not set in the environment variables")
 
 genai.configure(api_key=google_api_key)
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+
 
 # Setup logger
 
@@ -212,7 +210,7 @@ def get_postgres_connection(table_name: str):
     """
     db_host = os.getenv("DB_HOST", "").strip()
     db_user = os.getenv("DB_USER", "").strip()
-    db_password = os.getenv("DB_PASSWORD", "").strip()
+    db_password = 'wes@1234' #os.getenv("DB_PASSWORD", "").strip()
     db_port = os.getenv("DB_PORT", "5432").strip()
     db_name = "postgres" #os.getenv("DB_NAME", "postgres").strip()
 
@@ -233,31 +231,40 @@ def get_postgres_connection(table_name: str):
         logger.error(f"An unexpected error occurred: {e}")
         raise
 
-def generate_nomic_embedding(text: str) -> List[float]:
-    """
-    Generate an embedding for the given text using the Nomic API.
-    
-    Args:
-    text (str): The input text to embed.
-    
-    Returns:
-    list: The embedding vector as a list of floats.
-    """
-    try:
-        output = embed.text(
-            texts=[text],
-            model='nomic-embed-text-v1.5',
-            task_type="search_document",
-            dimensionality=256,
-        )
-        # The output is a numpy array, so we convert it to a list
-        embedding = output[0].tolist()
-        return embedding
-    except Exception as e:
-        logger.error(f"Error generating Nomic embedding: {e}")
-        return []
 
 #Main Functions
+def get_conversation_history(session_id: str, limit: int = 500) -> List[Dict[str, str]]:
+    logger.info(f"Fetching conversation history for user: {session_id}")
+    conn = get_postgres_connection("respond_to_human")  # Changed this line
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT state->>'qweli_response' as assistant, state->>'user_input' as human
+                FROM respond_to_human
+                WHERE state->>'session_id' = %s
+                ORDER BY id DESC
+                LIMIT %s
+            """, (session_id, limit))
+            
+            rows = cur.fetchall()
+            
+            history = []
+            for row in rows:
+                if row[1]:  # human input
+                    history.append(f"human: {row[1]}")
+                if row[0]:  # assistant response
+                    history.append(f"AI: {row[0]}")
+            
+            logger.info(f"Retrieved {len(history)} conversation entries for session: {session_id}")
+            return list(reversed(history))  # Reverse to get chronological order
+    except Exception as e:
+        logger.error(f"Error fetching conversation history: {e}")
+        return []
+    finally:
+        conn.close()
+
+
 def handle_user_input(state: MainState) -> MainState:
     logger.info(f"Handling user input: {state['user_input']}")
     conversation_history = state.get("conversation_history", [])
@@ -550,84 +557,11 @@ def check_document_relevance(state: MainState) -> MainState:
     return state
     
 
-def check_tavily_relevance(state: MainState) -> MainState:
-    logger.info("Checking Tavily results relevance")
-    comprehensive_query = state.get("comprehensive_query", "")
-    tavily_results = state.get("tavily_results", [])
 
-    for result in tavily_results:
-        result_content = result["content"]
-        
-        prompt = f"""
-        Given the comprehensive query:
-        Query: "{comprehensive_query}"
-        
-        And the following Tavily search result:
-        Result: "{result_content}"
-
-        Analyze whether this document provides useful information related to the comprehensive query. Consider the following:
-        1. Does the document contribute to answering at least 20% of the comprehensive query?
-        2. Does the document address any main points or subtopics of the query?
-        3. Is the content relevant to the query topic?
-        4. Does it provide any insights or details that could be helpful in formulating a response?
-
-        Even if the document doesn't fully answer the query, respond with "Yes" if it covers at least 20% of the query or provides significant relevant information. Otherwise, respond with "No".
-
-        After your analysis, respond with only "Yes" or "No".
-        """
-
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant tasked with analyzing search result relevance."},
-            {"role": "user", "content": prompt}
-        ]
-
-        try:
-            llm_response = call_llm_api(messages)
-            result["answers_query"] = "Yes" if "yes" in llm_response.strip().lower() else "No"
-        except Exception as e:
-            logger.error(f"Error analyzing Tavily result: {e}")
-            result["answers_query"] = "Yes"  # Default to 'Yes' on error
-
-    logger.info(f"Relevant Tavily results after check: {len([result for result in state['tavily_results'] if result['answers_query'] == 'Yes'])}")
-    return state
-
-def search_with_tavily(state: MainState) -> MainState:
-    logger.info("Searching with Tavily")
-    comprehensive_query = state.get("comprehensive_query", "")
-    similar_questions = state.get("similar_questions", [])
-
-    all_queries = [comprehensive_query] + similar_questions
-
-    all_results = []
-    for query in all_queries:
-        try:
-            search_result = tavily_client.search(
-                query=query,
-                search_depth="advanced",
-                max_results=5,
-                include_domains=["https://www.worldbank.org/en/home"]
-            )
-            all_results.extend(search_result.get('results', []))
-        except Exception as e:
-            logger.error(f"Error in Tavily search for query '{query}': {e}")
-
-    state["tavily_results"] = [
-        {
-            "content": result.get('content', ''),
-            "metadata": {
-                "url": result.get('url', ''),
-                "title": result.get('title', ''),
-                "score": result.get('score', 0)
-            }
-        } for result in all_results
-    ]
-
-    logger.info(f"Tavily search results: {len(state['tavily_results'])}")
-    return state
 
 def qweli_agent_RAG(state: MainState) -> MainState:
     logger.info("Qweli agent processing RAG results")
-    relevant_documents = state.get("documents", []) + state.get("tavily_results", [])
+    relevant_documents = state.get("documents", [])
     relevant_documents = [doc for doc in relevant_documents if doc.get("answers_query") == "Yes"]
     
     if not relevant_documents:
@@ -708,102 +642,53 @@ def qweli_agent_RAG(state: MainState) -> MainState:
         conn.close()
     return state
 
-# LangGraph setup
-def create_graph():
-    workflow = StateGraph(MainState)
 
-    # Define nodes
-    workflow.add_node("handle_user_input", handle_user_input)
-    workflow.add_node("refine_query_for_RAG", refine_query_for_RAG)
-    workflow.add_node("retrieval", retrieval)
-    workflow.add_node("check_document_relevance", check_document_relevance)
-    #workflow.add_node("check_tavily_relevance", check_tavily_relevance)
-    #workflow.add_node("search_with_tavily", search_with_tavily)
-    workflow.add_node("qweli_agent_RAG", qweli_agent_RAG)
+def process_query(user_input: str, session_id: str, user_id: str, conversation_id: str) -> Dict[str, Any]:
+    # Initialize the state
+    state = {
+        "user_id": user_id,
+        "session_id": session_id,
+        "conversation_id": conversation_id,
+        "user_input": user_input,
+        "conversation_history": [],
+        "documents": [],
+        "qweli_response": "",
+        "suggested_question": "",
+    }
 
-    # Define edges
-    workflow.add_edge(START, "handle_user_input")
-    workflow.add_conditional_edges(
-        "handle_user_input",
-        lambda x: "refine_query_for_RAG" if x.get("selected_tool", {}).get("name") == "RAG" else "END",
-        {
-            "refine_query_for_RAG": "refine_query_for_RAG",
-            "END": END
-        
+    # Handle user input
+    state = handle_user_input(state)
+
+    # Check if it's chitchat
+    if state.get("selected_tool", {}).get("name") == "chitchat":
+        # For chitchat, we already have the response in the state
+        return {
+            "qweli_agent_RAG": {
+                "qweli_response": state.get("qweli_response", ""),
+                "suggested_question": ""
+            }
         }
-    )
-    workflow.add_edge("refine_query_for_RAG", "retrieval")
-    """
-    workflow.add_conditional_edges(
-        "retrieval",
-        lambda x: "check_document_relevance" if x["documents"] else "search_with_tavily",
-        {
-            "check_document_relevance": "check_document_relevance",
-            "search_with_tavily": "search_with_tavily"
+
+    # If it's not chitchat, proceed with RAG
+    if state.get("selected_tool", {}).get("name") == "RAG":
+        # Refine query for RAG
+        state = refine_query_for_RAG(state)
+
+        # Retrieval
+        state = retrieval(state)
+
+        # Check document relevance
+        state = check_document_relevance(state)
+
+        # Qweli agent RAG
+        state = qweli_agent_RAG(state)
+
+    # Prepare the final output
+    final_output = {
+        "qweli_agent_RAG": {
+            "qweli_response": state.get("qweli_response", ""),
+            "suggested_question": state.get("suggested_question", "What else would you like to know?")
         }
-    )"""
+    }
 
-    workflow.add_edge("retrieval", "check_document_relevance")
-    workflow.add_edge("check_document_relevance", "qweli_agent_RAG")
-    #workflow.add_edge("qweli_agent_RAG", END)
-
-    """workflow.add_conditional_edges(
-        "check_document_relevance",
-        lambda x: "qweli_agent_RAG" if x["documents"] else "search_with_tavily",
-        {
-            "search_with_tavily": "search_with_tavily",
-            "qweli_agent_RAG": "qweli_agent_RAG"
-        }
-    )
-    
-    workflow.add_conditional_edges(
-        "search_with_tavily",
-        lambda x: "check_tavily_relevance" if x["tavily_results"] else "qweli_agent_RAG",
-        {
-            "check_tavily_relevance": "check_tavily_relevance",
-            "qweli_agent_RAG": "qweli_agent_RAG"
-        }
-    )
-    workflow.add_edge("check_tavily_relevance", "qweli_agent_RAG")
-    """
-    workflow.add_edge("qweli_agent_RAG", END)
-
-    return workflow
-
-
-def get_conversation_history(user_id: str, limit: int = 15) -> List[Dict[str, str]]:
-    logger.info(f"Fetching conversation history for user: {user_id}")
-    conn = get_postgres_connection("respond_to_human")  # Changed this line
-    
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT state->>'qweli_response' as assistant, state->>'user_input' as human
-                FROM respond_to_human
-                WHERE state->>'user_id' = %s
-                ORDER BY id DESC
-                LIMIT %s
-            """, (user_id, limit))
-            
-            rows = cur.fetchall()
-            
-            history = []
-            for row in rows:
-                if row[1]:  # human input
-                    history.append(f"human: {row[1]}")
-                if row[0]:  # assistant response
-                    history.append(f"AI: {row[0]}")
-            
-            logger.info(f"Retrieved {len(history)} conversation entries for user: {user_id}")
-            return list(reversed(history))  # Reverse to get chronological order
-    except Exception as e:
-        logger.error(f"Error fetching conversation history: {e}")
-        return []
-    finally:
-        conn.close()
-
-        
-if __name__ == "__main__":
-    # This block will only run if qweli.py is executed directly
-    graph = create_graph()
-    # Add any other initialization or testing code here
+    return final_output

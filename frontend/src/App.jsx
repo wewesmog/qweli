@@ -149,12 +149,12 @@ function App() {
     }
   }, [conversationHistory]);
 
-  const handleRun = async () => {
-    if (input !== '' && sessionId) {
+  const handleRun = async (customPrompt = null) => {
+    const prompt = customPrompt || input; // Check if customPrompt exists, else use input
+    if (prompt !== '' && sessionId) {
       setSuggestedQuestion(''); // Clear the current suggested question
-      const userMessage = { role: 'user', parts: [{ text: input }] };
+      const userMessage = { role: 'user', parts: [{ text: prompt }] };
       setConversationHistory((prev) => [...prev, userMessage]);
-      let prompt = input;
       setInput('');
       setLoading(true);
 
@@ -197,6 +197,9 @@ function App() {
     }
   };
 
+  const handleSuggestedQuestionClick = (question) => {
+    handleRun(question); // Directly run the question
+  };
 
   return (
     <div className="App">
@@ -240,12 +243,12 @@ function App() {
       <div className="Footer">
         {suggestedQuestion && (
           <div className="sgTxt">
-            <button className="sgBtn" onClick={() => setInput(suggestedQuestion)}>
+            <button className="sgBtn" onClick={() => handleSuggestedQuestionClick(suggestedQuestion)}>
               <span>{suggestedQuestion}</span>
             </button>
           </div>
         )}
-        <div className="Search">
+         <div className="Search">
           <input
             type="text"
             value={input}
@@ -256,7 +259,7 @@ function App() {
                 handleRun();
               }
             }}
-            placeholder="Ask me any Vooma question (for Now)"
+            placeholder="Ask me anything about Swiftcash"
             className="searchBar"
           />
           <button className="srhImg">

@@ -1,3 +1,5 @@
+
+
 import os
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -15,7 +17,7 @@ from psycopg2.extras import Json
 from google.generativeai import GenerativeModel
 import numpy as np
 from openai import OpenAI
-
+from tavily import TavilyClient
 
 # Load environment variables
 load_dotenv()
@@ -519,9 +521,12 @@ def check_document_relevance(state: MainState) -> MainState:
     logger.info("Checking document relevance")
     comprehensive_query = state.get("comprehensive_query", "")
     documents = state.get("documents", [])
+    
+    # Create a new list for relevant documents
+    relevant_documents = []
 
     for document in documents:
-        doc_content = document["content"]
+        doc_content = document.get("content", "")  # Safely get content
         
         prompt = f"""
         Given the comprehensive query:
@@ -549,15 +554,90 @@ def check_document_relevance(state: MainState) -> MainState:
         try:
             llm_response = call_llm_api(messages)
             document["answers_query"] = "Yes" if "yes" in llm_response.strip().lower() else "No"
+            
+            # Only add relevant documents to the new list
+            if document["answers_query"] == "Yes":
+                relevant_documents.append(document)
+                
         except Exception as e:
             logger.error(f"Error analyzing document ID {document.get('id', 'unknown')}: {e}")
-            document["answers_query"] = "Yes"  # Default to 'Yes' on error
+            # Skip this document if there's an error
+            continue
 
-    logger.info(f"Relevant documents after check: {len([doc for doc in state['documents'] if doc['answers_query'] == 'Yes'])}")
+    # Replace the documents in state with only the relevant ones
+    state["documents"] = relevant_documents
+    
+    logger.info(f"Found {len(relevant_documents)} relevant documents")
     return state
     
+def get_tavily_results(state: MainState) -> MainState:
+  
+    logger.info("Getting Tavily results")
+    tavily_api_key = os.getenv("TAVILY_API_KEY")
+    tavily_client = TavilyClient(api_key=tavily_api_key) 
+    #get all queries from the state
+    queries = [state.get("comprehensive_query", ""), state.get("similar_questions", [])]
+    #get the results from www.sema-ai.com/swiftcash only
+    #limit the results to 3
+    for query in queries:
+        results = tavily_client.search(query, source_type="website", source_domain="www.sema-ai.com/swiftcash", limit=3)
+        state['tavily_results'] = results
+    return state
 
 
+def check_tavily_document_relevance(state: MainState) -> MainState:
+    logger.info("Checking Tavily document relevance")
+    comprehensive_query = state.get("comprehensive_query", "")
+    documents = state.get("tavily_results", [])
+    
+    # Create a new list for relevant documents
+    relevant_documents = []
+
+    for document in documents:
+        # Safely get content with a default empty string if not found
+        doc_content = document.get("content", "")
+        
+        prompt = f"""
+        Given the comprehensive query:
+        Query: "{comprehensive_query}"
+        
+        And the following document content:
+        Document: "{doc_content}"
+
+        Analyze whether this document provides useful information related to the comprehensive query. Consider the following:
+        1. Does the document contribute to answering at least 20% of the comprehensive query?
+        2. Does the document address any main points or subtopics of the query?
+        3. Is the content relevant to the query topic?
+        4. Does it provide any insights or details that could be helpful in formulating a response?
+
+        Even if the document doesn't fully answer the query, respond with "Yes" if it covers at least 20% of the query or provides significant relevant information. Otherwise, respond with "No".
+
+        After your analysis, respond with only "Yes" or "No".
+        """
+
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant in Swiftcash bank tasked with analyzing document relevance."},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            llm_response = call_llm_api(messages)
+            document["answers_query"] = "Yes" if "yes" in llm_response.strip().lower() else "No"
+            
+            # Only add relevant documents to the new list
+            if document["answers_query"] == "Yes":
+                relevant_documents.append(document)
+                
+        except Exception as e:
+            logger.error(f"Error analyzing Tavily document: {e}")
+            # Skip this document if there's an error
+            continue
+
+    # Replace the tavily_results in state with only the relevant ones
+    state["tavily_results"] = relevant_documents
+    
+    logger.info(f"Found {len(relevant_documents)} relevant Tavily documents")
+    return state
 
 def qweli_agent_RAG(state: MainState) -> MainState:
     logger.info("Qweli agent processing RAG results")
@@ -676,12 +756,28 @@ def process_query(user_input: str, session_id: str, user_id: str, conversation_i
 
         # Retrieval
         state = retrieval(state)
+        if state.get("documents", []):
+            state = check_document_relevance(state)
+            #if relevant documents are found, run the qweli agent
+            if state.get("documents", []):
+                state = qweli_agent_RAG(state)
+            else:
+                state = get_tavily_results(state)
+                if state.get("tavily_results", []):
+                    state = check_tavily_document_relevance(state)
+                    state = qweli_agent_RAG(state)
+                else:
+                    state = qweli_agent_RAG(state)
+        else:
+            state = get_tavily_results(state)
+            if state.get("tavily_results", []):
+                state = check_tavily_document_relevance(state)
+                state = qweli_agent_RAG(state)
+            else:
+                state = qweli_agent_RAG(state)
 
-        # Check document relevance
-        state = check_document_relevance(state)
-
-        # Qweli agent RAG
-        state = qweli_agent_RAG(state)
+                
+       
 
     # Prepare the final output
     final_output = {

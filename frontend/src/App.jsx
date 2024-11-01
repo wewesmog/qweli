@@ -277,7 +277,7 @@ function App() {
           )}
         </div>
         <div className="info">
-          While Qweli strives for accuracy, please always countercheck information provided. Qweli may not always get it right.
+          While Qweli strives for accuracy, please always countercheck information provided using documentation or the <a href="www.sema-ai.com/swiftcash" target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'underline', color: 'blue' }}> website</a>.
         </div>
       </div>
     </div>

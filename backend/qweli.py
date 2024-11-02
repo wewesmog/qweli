@@ -1,5 +1,3 @@
-
-
 import os
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -476,7 +474,7 @@ def retrieval(state: MainState) -> MainState:
                         WHERE 1 - (embeddings <=> %s::vector) >= %s
                         ORDER BY similarity DESC
                         LIMIT %s
-                    """, (embedding_str, embedding_str, 0.7, 3))
+                    """, (embedding_str, embedding_str, 0.8, 3))
                     
                     
                     rows = cur.fetchall()
@@ -513,6 +511,7 @@ def retrieval(state: MainState) -> MainState:
             unique_documents.append(doc)
 
     logger.info(f"Retrieved {len(unique_documents)} unique documents")
+    logger.info(f"Unique documents: {unique_documents}")
     state['documents'] = unique_documents
 
     return state
@@ -535,22 +534,36 @@ def check_document_relevance(state: MainState) -> MainState:
         And the following document content:
         Document: "{doc_content}"
 
-        Analyze whether this document provides useful information related to the comprehensive query. Consider the following:
-        1. Does the document contribute to answering at least 20% of the comprehensive query?
-        2. Does the document address any main points or subtopics of the query?
-        3. Is the content relevant to the query topic?
-        4. Does it provide any insights or details that could be helpful in formulating a response?
+        Analyze whether this document provides useful information related to the comprehensive query by following these RELAXED rules:
 
-        Even if the document doesn't fully answer the query, respond with "Yes" if it covers at least 20% of the query or provides significant relevant information. Otherwise, respond with "No".
+        1. QUERY TYPE IDENTIFICATION:
+           - First, identify if this is a general information query (e.g., "What is a Current Account?", "What services does Swiftcash offer?")
+           - Or if it's a specific product query (e.g., "What is Vooma loan?", "How does Jiokolee loan work?")
+
+        2. DOCUMENT RELEVANCE RULES:
+            - Include the document if it:
+              * Mentions the product or service being asked about
+              * Contains ANY related information about the topic
+              * Provides context about banking services related to the query
+              * Includes partial information that might be useful
+            - For general queries: Include if it has ANY banking-related information
+            - For specific queries: Include if it mentions the product/service name
+            - When in doubt, INCLUDE the document
+
+        3. DO NOT EXCLUDE DOCUMENTS THAT:
+           - Only partially answer the query
+           - Contain related but not exact information
+           - Provide general context about the topic
+           - Come from related banking services
 
         After your analysis, respond with only "Yes" or "No".
+        Remember: It's better to include a potentially relevant document than to exclude it.
         """
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant in Swiftcash bank tasked with analyzing document relevance."},
+            {"role": "system", "content": "You are a strict document relevance checker that adapts criteria based on query type (general vs specific)."},
             {"role": "user", "content": prompt}
         ]
-
         try:
             llm_response = call_llm_api(messages)
             document["answers_query"] = "Yes" if "yes" in llm_response.strip().lower() else "No"
@@ -571,66 +584,113 @@ def check_document_relevance(state: MainState) -> MainState:
     return state
     
 def get_tavily_results(state: MainState) -> MainState:
-  
     logger.info("Getting Tavily results")
-    tavily_api_key = os.getenv("TAVILY_API_KEY")
-    tavily_client = TavilyClient(api_key=tavily_api_key) 
-    #get all queries from the state
-    queries = [state.get("comprehensive_query", ""), state.get("similar_questions", [])]
-    #get the results from www.sema-ai.com/swiftcash only
-    #limit the results to 3
-    for query in queries:
-        results = tavily_client.search(query, source_type="website", source_domain="www.sema-ai.com/swiftcash", limit=3)
-        state['tavily_results'] = results
-    return state
+    try:
+        tavily_api_key = os.getenv("TAVILY_API_KEY")
+        if not tavily_api_key:
+            logger.error("Tavily API key not found")
+            state['tavily_results'] = []
+            return state
 
+        tavily_client = TavilyClient(api_key=tavily_api_key) 
+        
+        # Get the comprehensive query
+        query = state.get("comprehensive_query", "")
+        
+        try:
+            # Make the API call
+            response = tavily_client.search(
+                query=query,
+                search_depth="deep",
+                include_domains=["https://ke.kcbgroup.com/for-you/open-account/transactional-accounts/current-acccount"],
+                max_results=4
+            )
+            
+            # Extract just the results array from the response
+            if isinstance(response, dict) and 'results' in response:
+                state['tavily_results'] = response['results']
+            else:
+                state['tavily_results'] = []
+                
+            logger.info(f"Retrieved {len(state['tavily_results'])} results from Tavily")
+            logger.info(f"Tavily results: {state['tavily_results']}")
+        except Exception as e:
+            logger.error(f"Error getting Tavily results for query '{query}': {e}")
+            state['tavily_results'] = []
+
+    except Exception as e:
+        logger.error(f"Error in get_tavily_results: {e}")
+        state['tavily_results'] = []
+    
+    return state
 
 def check_tavily_document_relevance(state: MainState) -> MainState:
     logger.info("Checking Tavily document relevance")
     comprehensive_query = state.get("comprehensive_query", "")
-    documents = state.get("tavily_results", [])
+    tavily_response = state.get("tavily_results", {})
+    
+    # Extract only the actual results from Tavily response
+    documents = tavily_response.get("results", []) if isinstance(tavily_response, dict) else []
     
     # Create a new list for relevant documents
     relevant_documents = []
 
     for document in documents:
-        # Safely get content with a default empty string if not found
-        doc_content = document.get("content", "")
-        
-        prompt = f"""
-        Given the comprehensive query:
-        Query: "{comprehensive_query}"
-        
-        And the following document content:
-        Document: "{doc_content}"
-
-        Analyze whether this document provides useful information related to the comprehensive query. Consider the following:
-        1. Does the document contribute to answering at least 20% of the comprehensive query?
-        2. Does the document address any main points or subtopics of the query?
-        3. Is the content relevant to the query topic?
-        4. Does it provide any insights or details that could be helpful in formulating a response?
-
-        Even if the document doesn't fully answer the query, respond with "Yes" if it covers at least 20% of the query or provides significant relevant information. Otherwise, respond with "No".
-
-        After your analysis, respond with only "Yes" or "No".
-        """
-
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant in Swiftcash bank tasked with analyzing document relevance."},
-            {"role": "user", "content": prompt}
-        ]
-
         try:
+            # For Tavily results, combine title and content
+            doc_content = f"{document.get('title', '')} {document.get('content', '')}"
+            
+            prompt = f"""
+            Given the comprehensive query:
+            Query: "{comprehensive_query}"
+            
+            And the following document content:
+            Document: "{doc_content}"
+
+            Analyze whether this document provides useful information related to the comprehensive query by following these RELAXED rules:
+
+            1. QUERY TYPE IDENTIFICATION:
+               - First, identify if this is a general information query (e.g., "What is a Current Account?", "What services does Swiftcash offer?")
+               - Or if it's a specific product query (e.g., "What is Vooma loan?", "How does Jiokolee loan work?")
+
+            2. DOCUMENT RELEVANCE RULES:
+                - Include the document if it:
+                  * Mentions the product or service being asked about
+                  * Contains ANY related information about the topic
+                  * Provides context about banking services related to the query
+                  * Includes partial information that might be useful
+                - For general queries: Include if it has ANY banking-related information
+                - For specific queries: Include if it mentions the product/service name
+                - When in doubt, INCLUDE the document
+
+            3. DO NOT EXCLUDE DOCUMENTS THAT:
+               - Only partially answer the query
+               - Contain related but not exact information
+               - Provide general context about the topic
+               - Come from related banking services
+
+            After your analysis, respond with only "Yes" or "No".
+            Remember: It's better to include a potentially relevant document than to exclude it.
+            """
+
+            messages = [
+                {"role": "system", "content": "You are a document relevance checker that includes documents containing any relevant information about the query topic."},
+                {"role": "user", "content": prompt}
+            ]
+
             llm_response = call_llm_api(messages)
-            document["answers_query"] = "Yes" if "yes" in llm_response.strip().lower() else "No"
+            
+            # Create a new dictionary with all original fields plus the answers_query field
+            relevant_doc = document.copy()
+            relevant_doc["answers_query"] = "Yes" if "yes" in llm_response.strip().lower() else "No"
             
             # Only add relevant documents to the new list
-            if document["answers_query"] == "Yes":
-                relevant_documents.append(document)
+            if relevant_doc["answers_query"] == "Yes":
+                relevant_documents.append(relevant_doc)
                 
         except Exception as e:
             logger.error(f"Error analyzing Tavily document: {e}")
-            # Skip this document if there's an error
+            logger.error(f"Document structure: {document}")
             continue
 
     # Replace the tavily_results in state with only the relevant ones
@@ -639,46 +699,111 @@ def check_tavily_document_relevance(state: MainState) -> MainState:
     logger.info(f"Found {len(relevant_documents)} relevant Tavily documents")
     return state
 
+
 def qweli_agent_RAG(state: MainState) -> MainState:
     logger.info("Qweli agent processing RAG results")
     relevant_documents = state.get("documents", [])
-    relevant_documents = [doc for doc in relevant_documents if doc.get("answers_query") == "Yes"]
+    tavily_results = state.get("tavily_results", [])
     
-    if not relevant_documents:
-        state["qweli_response"] = "I apologize, but after searching our documents, I couldn't find a relevant answer to your query. Could you please rephrase your question or provide more details?"
-        state["suggested_question"] = ""
+    # Combine all documents - they're already checked for relevance
+    all_relevant_docs = relevant_documents + tavily_results
+
+    if not all_relevant_docs:
+        prompt = f"""
+        User Query: "{state['user_input']}"
+
+        Search Details:
+        - We searched our internal knowledge base
+        - We also searched external sources
+        - No relevant documents were found
+
+        Instructions:
+        1. Acknowledge that we don't have documented information about this specific query
+        2. Do not make up or provide information from general knowledge
+        3. Format response in markdown.
+        4. Format your response strictly as a JSON object with two fields: "answer" and "suggested_question"
+        5. For suggested_question: Provide a specific question about our products or services that a customer might ask
+           Examples of good suggested questions:
+           - "What are the benefits of a Savings Account?"
+           - "How do I apply for a personal loan?"
+           - "What are your current interest rates?"
+           NOT:
+           - "Would you like to learn about...?"
+           - "Can I help you with...?"
+           - "Would you like to know...?"
+
+        Example format:
+        {{
+            "answer": "I apologize, but I don't have any documented information about [topic].",
+            "suggested_question": "What are the features of our Savings Account?"
+        }}
+        """
+
+        messages = [
+            {"role": "system", "content": "You are Qweli, a professional assistant in Swiftcash bank. You only provide information from documented sources."},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            llm_response = call_llm_api(messages)
+            response_data = json.loads(llm_response.strip())
+            state["qweli_response"] = response_data["answer"]
+            state["suggested_question"] = response_data["suggested_question"]
+        except Exception as e:
+            logger.error(f"Error in Qweli agent no results handler: {e}")
+            state["qweli_response"] = "I apologize, but I don't have any documented information to answer your query. Please try asking about something else."
+            state["suggested_question"] = "What are the different types of accounts available at Swiftcash Bank?"
+            
+        # Update conversation history and return
+        state["conversation_history"].append({"role": "assistant", "content": state["qweli_response"]})
         return state
 
+    # If we have documents, use them to answer the query
     prompt = f"""
     User Query: "{state['user_input']}"
 
     Conversation History:
     {state['conversation_history']}
 
-    Relevant Documents:
-    {json.dumps(relevant_documents, indent=2)}
+    Available Documents:
+    {json.dumps(all_relevant_docs, indent=2)}
 
     Instructions:
-    1. Using the information from the relevant documents and considering the conversation history, 
-       provide a professional & comprehensive answer to the user's query as well as a suggested next question. 
-    2. Cite your sources based on the metadata provided. Use the file name or URL as the source.
-    3. If multiple sources are used, cite each one separately, however check and ensure that there is no repetition of sources.
-    4. Do not start your response with "Based on the information provided", or "Answer*" : Just give the answer.
-    5. Do not make up any information.
-    6. If the documents do not contain sufficient information to answer the query, state that clearly.
-    7. Present your answer in a well-formatted markdown style.
-    8. After providing the answer, suggest a logical follow-up question that a customer might ask based on the information provided.
-    9. Format your response strictly as a JSON object with two fields: "answer" and "suggested_question".
+    1. ONLY use information from the provided documents to answer the query
+    2. Do not add any information from general knowledge
+    3. If the documents provide partial information:
+       - Share what's available
+       - Clearly state what information is missing
+       - Do not fill gaps with assumed information
+    4. Format your response in markdown with beautiful & readable formatting
+       - Use line breaks, paragraphs
+       - Add **bold**, *italics*, _underline_ where appropriate
+       - Use Numbering or Bullets where appropriate
+       - Use emojis where appropriate
+    5. ALWAYS include source citation at the end of your answer:
+       
+       Source(s):
+       - [Document Title], Page [X]
+       - [Website Title] (URL)
 
-    Example format:
+    6. Your response MUST be a valid JSON object with these fields:
+       - "answer": Your formatted response including the source citation
+       - "suggested_question": A natural follow-up question from the documents
+
+    Example Response:
     {{
-        "answer": "Your comprehensive answer here, with proper citations and markdown formatting.",
-        "suggested_question": "A logical follow-up question based on the provided answer."
+        "answer": "The **Jiokolee Loan** is a quick loan solution with these features:\\n\\n- Amounts from KES 1,000 to 50,000\\n- Flexible repayment periods\\n\\nSource(s):\\n- Swiftcash Bank Documentation, Page 1",
+        "suggested_question": "What documents do I need to apply for Jiokolee Loan?"
     }}
+
+    IMPORTANT:
+    - Return ONLY a valid JSON object
+    - Include source citation IN the answer field
+    - Suggested question must be relevant to available information
     """
 
     messages = [
-        {"role": "system", "content": "You are Qweli, a professional assistant in Swiftcash bank, a single source of truth for all staff. You are tasked with answering user queries based on provided documents and conversation history & provide a suggested next question. Your responses should be accurate, concise, well-formatted in markdown style, and include source citations."},
+        {"role": "system", "content": "You are Qweli, a professional assistant in Swiftcash bank. You ONLY provide information that is explicitly stated in the provided documents."},
         {"role": "user", "content": prompt}
     ]
 
@@ -688,25 +813,27 @@ def qweli_agent_RAG(state: MainState) -> MainState:
         response_data = json.loads(llm_response.strip())
         
         state["qweli_response"] = response_data["answer"]
-        state["suggested_question"] = response_data["suggested_question"]
+        state["suggested_question"] = response_data.get("suggested_question","")
         
         logger.info(f"Qweli response generated: {state['qweli_response'][:100]}...")
         logger.info(f"Suggested question generated: {state['suggested_question']}")
     except Exception as e:
         logger.error(f"Error in Qweli agent: {e}")
         state["qweli_response"] = "I apologize, but I encountered an error while processing your query. Please try again later."
-        state["suggested_question"] = ""
+        state["suggested_question"] = "What are the requirements to open a bank account?"
     
     # Update conversation history
     state["conversation_history"].append({"role": "assistant", "content": state["qweli_response"]})
 
     print(f"State after Qweli agent: {state}")
-    # Establish PostgreSQL connection
-    table_name = "public.respond_to_human"
-    conn = get_postgres_connection(table_name)  # Changed this line
     
-    # Insert the state into the database
+    # Database operations
     try:
+        # Establish PostgreSQL connection
+        table_name = "public.respond_to_human"
+        conn = get_postgres_connection(table_name)
+        
+        # Insert the state into the database
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO respond_to_human (state)
@@ -717,11 +844,13 @@ def qweli_agent_RAG(state: MainState) -> MainState:
         logger.info("Successfully inserted state into respond_to_human table")
     except Exception as e:
         logger.error(f"Error inserting state into database: {e}")
-        conn.rollback()
+        if 'conn' in locals():
+            conn.rollback()
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
+            
     return state
-
 
 def process_query(user_input: str, session_id: str, user_id: str, conversation_id: str) -> Dict[str, Any]:
     # Initialize the state
@@ -764,14 +893,14 @@ def process_query(user_input: str, session_id: str, user_id: str, conversation_i
             else:
                 state = get_tavily_results(state)
                 if state.get("tavily_results", []):
-                    state = check_tavily_document_relevance(state)
+                    #state = check_tavily_document_relevance(state)
                     state = qweli_agent_RAG(state)
                 else:
                     state = qweli_agent_RAG(state)
         else:
             state = get_tavily_results(state)
             if state.get("tavily_results", []):
-                state = check_tavily_document_relevance(state)
+                #state = check_tavily_document_relevance(state)
                 state = qweli_agent_RAG(state)
             else:
                 state = qweli_agent_RAG(state)
@@ -788,3 +917,4 @@ def process_query(user_input: str, session_id: str, user_id: str, conversation_i
     }
 
     return final_output
+   

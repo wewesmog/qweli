@@ -269,9 +269,13 @@ function App() {
             <img src={assets.mic_icon} alt="Mic Icon" />
           </button>
           {input !== '' ? (
-            <button className="srhImg" onClick={handleRun}>
-              <img src={assets.send_icon} alt="Send Icon" />
-            </button>
+            <button 
+            className="srhImg" 
+            onClick={() => handleRun()}  // Fixed version
+            type="button"
+            >
+            <img src={assets.send_icon} alt="Send Icon" />
+        </button>
           ) : (
             ''
           )}

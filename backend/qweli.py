@@ -521,68 +521,86 @@ def check_document_relevance(state: MainState) -> MainState:
     comprehensive_query = state.get("comprehensive_query", "")
     documents = state.get("documents", [])
     
-    # Create a new list for relevant documents
-    relevant_documents = []
+    if not documents:
+        logger.info("No documents found in state")
+        state["documents"] = []
+        return state
 
-    for document in documents:
-        doc_content = document.get("content", "")  # Safely get content
+    # Build the prompt for document relevance check
+    prompt = f"""
+    Given the comprehensive query:
+    Query: "{comprehensive_query}"
+    
+    And the following list of documents:
+    {json.dumps([{
+        "id": doc.get("id"),
+        "content": doc.get("content", ""),
+        "metadata": doc.get("metadata", {})
+    } for doc in documents], indent=2)}
+
+    Analyze which documents provide useful information related to the comprehensive query by following these RELAXED rules:
+
+    1. QUERY TYPE IDENTIFICATION:
+       - First, identify if this is a general information query (e.g., "What is a Current Account?", "What services does Swiftcash offer?")
+       - Or if it's a specific product query (e.g., "What is Vooma loan?", "How does Jiokolee loan work?")
+
+    2. DOCUMENT RELEVANCE RULES:
+        - Include documents that:
+          * Mention the product or service being asked about
+          * Contain ANY related information about the topic
+          * Provide context about banking services related to the query
+          * Include partial information that might be useful
+        - For general queries: Include if it has ANY banking-related information
+        - For specific queries: Include if it mentions the product/service name
+        - When in doubt, INCLUDE the document
+
+    3. DO NOT EXCLUDE DOCUMENTS THAT:
+       - Only partially answer the query
+       - Contain related but not exact information
+       - Provide general context about the topic
+       - Come from related banking services
+
+    Return ONLY a list of relevant document IDs. Example:
+    [1, 3, 4]
+
+    If no documents are relevant, return an empty list:
+    []
+
+    Remember: It's better to include a potentially relevant document than to exclude it.
+    """
+
+    messages = [
+        {"role": "system", "content": "You are a document relevance checker that includes documents containing any relevant information about the query topic."},
+        {"role": "user", "content": prompt}
+    ]
+
+    try:
+        llm_response = call_llm_api(messages)
+        logger.debug(f"Raw LLM response: {llm_response}")
         
-        prompt = f"""
-        Given the comprehensive query:
-        Query: "{comprehensive_query}"
+        # Clean the response to remove any extra formatting
+        cleaned_response = llm_response.strip().strip("`")
         
-        And the following document content:
-        Document: "{doc_content}"
-
-        Analyze whether this document provides useful information related to the comprehensive query by following these RELAXED rules:
-
-        1. QUERY TYPE IDENTIFICATION:
-           - First, identify if this is a general information query (e.g., "What is a Current Account?", "What services does Swiftcash offer?")
-           - Or if it's a specific product query (e.g., "What is Vooma loan?", "How does Jiokolee loan work?")
-
-        2. DOCUMENT RELEVANCE RULES:
-            - Include the document if it:
-              * Mentions the product or service being asked about
-              * Contains ANY related information about the topic
-              * Provides context about banking services related to the query
-              * Includes partial information that might be useful
-            - For general queries: Include if it has ANY banking-related information
-            - For specific queries: Include if it mentions the product/service name
-            - When in doubt, INCLUDE the document
-
-        3. DO NOT EXCLUDE DOCUMENTS THAT:
-           - Only partially answer the query
-           - Contain related but not exact information
-           - Provide general context about the topic
-           - Come from related banking services
-
-        After your analysis, respond with only "Yes" or "No".
-        Remember: It's better to include a potentially relevant document than to exclude it.
-        """
-
-        messages = [
-            {"role": "system", "content": "You are a strict document relevance checker that adapts criteria based on query type (general vs specific)."},
-            {"role": "user", "content": prompt}
-        ]
+        # Safely parse the response
         try:
-            llm_response = call_llm_api(messages)
-            document["answers_query"] = "Yes" if "yes" in llm_response.strip().lower() else "No"
-            
-            # Only add relevant documents to the new list
-            if document["answers_query"] == "Yes":
-                relevant_documents.append(document)
-                
-        except Exception as e:
-            logger.error(f"Error analyzing document ID {document.get('id', 'unknown')}: {e}")
-            # Skip this document if there's an error
-            continue
+            relevant_ids = json.loads(cleaned_response)
+        except json.JSONDecodeError:
+            logger.error("Failed to parse LLM response as JSON.")
+            state["documents"] = documents  # Keep all documents on error
+            return state
 
-    # Replace the documents in state with only the relevant ones
-    state["documents"] = relevant_documents
-    
-    logger.info(f"Found {len(relevant_documents)} relevant documents")
-    return state
-    
+        # Filter documents based on returned IDs
+        relevant_documents = [doc for doc in documents if doc.get("id") in relevant_ids]
+        state["documents"] = relevant_documents
+        
+        logger.info(f"Found {len(relevant_documents)} relevant documents")
+        return state
+                    
+    except Exception as e:
+        logger.error(f"Error in document relevance check: {e}")
+        state["documents"] = documents  # Keep all documents on error
+        return state 
+
 def get_tavily_results(state: MainState) -> MainState:
     logger.info("Getting Tavily results")
     try:
@@ -760,7 +778,8 @@ def qweli_agent_RAG(state: MainState) -> MainState:
 
     # If we have documents, use them to answer the query
     prompt = f"""
-    User Query: "{state['user_input']}"
+    Staff Query: "{state['user_input']}"
+    Comprehensive Query: "{state['comprehensive_query']}"
 
     Conversation History:
     {state['conversation_history']}
@@ -768,19 +787,19 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     Available Documents:
     {json.dumps(all_relevant_docs, indent=2)}
 
-    Instructions:
-    1. ONLY use information from the provided documents to answer the query
+    Instructions for Staff Response:
+    1. ONLY use information from the provided documents to answer both the staff query and comprehensive query
     2. Do not add any information from general knowledge
     3. If the documents provide partial information:
        - Share what's available
        - Clearly state what information is missing
        - Do not fill gaps with assumed information
-    4. Format your response in markdown with beautiful & readable formatting
-       - Use line breaks, paragraphs
-       - Add **bold**, *italics*, _underline_ where appropriate
-       - Use Numbering or Bullets where appropriate
-       - Use emojis where appropriate
-    5. ALWAYS include source citation at the end of your answer:
+    4. Format your response in markdown with professional, staff-appropriate formatting:
+       - Use line breaks and clear paragraphs
+       - Add **bold** for key product features and requirements
+       - Use bullet points for lists of features/benefits
+       - Include specific numbers, rates, and terms that staff can quote to customers
+    5. ALWAYS include source citation for staff reference:
        
        Source(s):
        - [Document Title], Page [X]
@@ -788,42 +807,61 @@ def qweli_agent_RAG(state: MainState) -> MainState:
 
     6. Your response MUST be a valid JSON object with these fields:
        - "answer": Your formatted response including the source citation
-       - "suggested_question": A natural follow-up question from the documents
+       - "suggested_question": A relevant follow-up question staff might need to know
 
     Example Response:
     {{
-        "answer": "The **Jiokolee Loan** is a quick loan solution with these features:\\n\\n- Amounts from KES 1,000 to 50,000\\n- Flexible repayment periods\\n\\nSource(s):\\n- Swiftcash Bank Documentation, Page 1",
-        "suggested_question": "What documents do I need to apply for Jiokolee Loan?"
+        "answer": "The **Jiokolee Loan** has the following features that you can discuss with customers:\\n\\n- **Loan Range**: KES 1,000 to 50,000\\n- **Repayment Terms**: Flexible 7-30 days\\n- **Interest Rate**: 0.1% per day (quote this to customers)\\n\\nSource(s):\\n- Swiftcash Bank Documentation, Page 1",
+        "suggested_question": "What are the specific documents customers need to provide for Jiokolee Loan application?"
     }}
 
     IMPORTANT:
     - Return ONLY a valid JSON object
     - Include source citation IN the answer field
-    - Suggested question must be relevant to available information
+    - Focus on information staff needs to advise customers
+    - Address both the original query and comprehensive query if they differ
     """
 
     messages = [
-        {"role": "system", "content": "You are Qweli, a professional assistant in Swiftcash bank. You ONLY provide information that is explicitly stated in the provided documents."},
+        {
+            "role": "system", 
+            "content": "You are Qweli, a professional banking assistant at Swiftcash bank. Your primary role is to help staff members access accurate product and service information so they can effectively advise and sell to customers. You MUST ONLY provide information that is explicitly stated in the provided documents, as staff will use this information to make commitments to customers. Never make assumptions or provide information not found in the official documentation."
+        },
         {"role": "user", "content": prompt}
     ]
 
+
     try:
         llm_response = call_llm_api(messages)
-        print(f"LLM response: {llm_response}")
-        response_data = json.loads(llm_response.strip())
         
+        # First try to parse as pure JSON
+        try:
+            response_data = json.loads(llm_response.strip())
+        except json.JSONDecodeError:
+            # If that fails, try to extract JSON from markdown
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', llm_response)
+            if json_match:
+                response_data = json.loads(json_match.group())
+            else:
+                raise ValueError("Could not extract JSON from response")
+
+        # Store the markdown-formatted answer and suggested question
         state["qweli_response"] = response_data["answer"]
-        state["suggested_question"] = response_data.get("suggested_question","")
+        state["suggested_question"] = response_data.get("suggested_question", "")
         
         logger.info(f"Qweli response generated: {state['qweli_response'][:100]}...")
         logger.info(f"Suggested question generated: {state['suggested_question']}")
     except Exception as e:
         logger.error(f"Error in Qweli agent: {e}")
+        logger.error(f"Raw LLM response: {llm_response}")
         state["qweli_response"] = "I apologize, but I encountered an error while processing your query. Please try again later."
         state["suggested_question"] = "What are the requirements to open a bank account?"
     
-    # Update conversation history
+    # Update conversation history with markdown-formatted response
     state["conversation_history"].append({"role": "assistant", "content": state["qweli_response"]})
+
+    return state
 
     print(f"State after Qweli agent: {state}")
     

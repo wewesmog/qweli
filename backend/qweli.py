@@ -11,7 +11,7 @@ import requests
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolExecutor
-from psycopg2.extras import Json
+from psycopg2.extras import Json, RealDictCursor
 from google.generativeai import GenerativeModel
 import numpy as np
 from openai import OpenAI
@@ -92,27 +92,11 @@ def call_llm_api1(messages: List[Dict[str, str]]) -> str:
         logger.error(f"Error calling Gemini API: {e}")
         return ""
 
-def call_llm_api1(messages: List[Dict[str, str]]) -> str:
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        #"model": "openai/gpt-3.5-turbo-0613",  # You can change this to another model if needed
-        "model": "meta-llama/llama-3.1-8b-instruct",
-        "messages": messages
-    }
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
-    except Exception as e:
-        logger.error(f"Error calling OpenRouter API: {e}")
-        return ""
+
 # Initialize the OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-#  gpt-3.5-turbo #gpt-4o-2024-08-06 #GPT-4o mini
+
+
 def call_embedding_api(text: str, model: str = "text-embedding-ada-002") -> List[float]:
     """
     Make a call to the OpenAI API for text embeddings.
@@ -131,9 +115,7 @@ def call_embedding_api(text: str, model: str = "text-embedding-ada-002") -> List
         # Log the error and re-raise it to be handled by the calling function
         print(f"Error in OpenAI Embedding API call: {e}")
 
-# Initialize the OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-#  gpt-3.5-turbo #gpt-4o-2024-08-06 #GPT-4o mini
+
 def call_llm_api(messages: List[Dict[str, str]], model: str = "gpt-4o-mini", max_tokens: int = 2000, temperature: float = 0.3) -> Any:
     """
     Make a call to the OpenAI API for chat completions.
@@ -157,49 +139,6 @@ def call_llm_api(messages: List[Dict[str, str]], model: str = "gpt-4o-mini", max
         print(f"Error in OpenAI API call: {e}")
         raise
         raise
-
-import re
-import json
-
-def call_llm_api1(messages: List[Dict[str, str]]) -> str:
-    url = "http://localhost:11434/api/chat"
-    headers = {
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "phi3:mini-4k", #"llama3.2:1b", #"mistral:latest",
-        "messages": messages,
-        "stream": False  # Set this to False to get a complete response
-    }
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        response_json = response.json()
-        print(f"Ollama API response: {response_json}")
-        if 'message' in response_json and 'content' in response_json['message']:
-            content = response_json['message']['content']
-            # Try to extract JSON-like content
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                try:
-                    extracted_json = json.loads(json_match.group())
-                    return json.dumps(extracted_json)
-                except json.JSONDecodeError:
-                    print(f"Failed to parse extracted JSON: {json_match.group()}")
-                    pass
-            # If JSON extraction fails, return the raw content
-            print(f"Returning raw content: {content}")
-            return content
-        else:
-            print(f"Unexpected response structure from Ollama API: {response_json}")
-            return ""
-    except json.JSONDecodeError as e:
-        print(f"Error decoding JSON from Ollama API: {e}")
-        print(f"Raw response: {response.text}")
-        return ""
-    except requests.RequestException as e:
-        print(f"Error calling Ollama API: {e}")
-        return ""
 
 def get_postgres_connection(table_name: str):
     """
@@ -232,10 +171,10 @@ def get_postgres_connection(table_name: str):
         raise
 
 
-#Main Functions
+
 def get_conversation_history(session_id: str, limit: int = 500) -> List[Dict[str, str]]:
     logger.info(f"Fetching conversation history for user: {session_id}")
-    conn = get_postgres_connection("respond_to_human")  # Changed this line
+    conn = get_postgres_connection("respond_to_human") 
     
     try:
         with conn.cursor() as cur:
@@ -264,10 +203,10 @@ def get_conversation_history(session_id: str, limit: int = 500) -> List[Dict[str
     finally:
         conn.close()
 
-
+#Main Functions
 def handle_user_input(state: MainState) -> MainState:
     logger.info(f"Handling user input: {state['user_input']}")
-    conversation_history = state.get("conversation_history", [])
+    conversation_history = get_conversation_history(state.get("session_id", ""))
     user_query = state.get("user_input", "")
     clarified_query = state.get("understood_query", "")
 
@@ -437,6 +376,77 @@ def refine_query_for_RAG(state: MainState) -> MainState:
 
 def retrieval(state: MainState) -> MainState:
     logger.info("Starting document retrieval")
+    comprehensive_query = state.get("comprehensive_query", "")
+    similar_questions = state.get("similar_questions", [])
+
+    try:
+        # 1. Batch all queries together
+        all_queries = [comprehensive_query] + similar_questions
+        logger.info(f"Processing {len(all_queries)} queries in batch")
+
+        # 2. Get embeddings using your existing function
+        all_embeddings = [call_embedding_api(query) for query in all_queries]
+        
+        # 3. Connect to database
+        conn = psycopg2.connect(
+            dbname=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT", "5432")
+        )
+        
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 4. Construct query with proper vector format
+            placeholders = ','.join([f"('[' || %s || ']')::vector" for _ in all_embeddings])
+            query = f"""
+                WITH query_embeddings AS (
+                    SELECT unnest(ARRAY[{placeholders}]) as embedding
+                ),
+                similarity_matches AS (
+                    SELECT DISTINCT ON (s.id)
+                        s.id,
+                        json_build_object(
+                            'title', 'Swiftcash Bank Documentation',
+                            'page', s.metadata
+                        ) as metadata,
+                        s.content,
+                        MAX(1 - (s.embeddings <=> q.embedding)) as similarity
+                    FROM 
+                        public.swiftcash s,
+                        query_embeddings q
+                    GROUP BY s.id, s.metadata, s.content
+                    HAVING MAX(1 - (s.embeddings <=> q.embedding)) >= 0.8
+                )
+                SELECT *
+                FROM similarity_matches
+                ORDER BY similarity DESC
+                LIMIT 5;
+            """
+            
+            # 5. Convert embeddings to strings for query parameters
+            embedding_strings = [','.join(map(str, emb)) for emb in all_embeddings]
+            
+            # 6. Execute query
+            cur.execute(query, embedding_strings)
+            results = cur.fetchall()
+            
+            documents = [dict(doc) for doc in results]
+            logger.info(f"Retrieved {len(documents)} unique documents")
+            state['documents'] = documents
+
+    except Exception as e:
+        logger.error(f"Error in batch retrieval: {e}")
+        logger.error("Full error traceback:", exc_info=True)
+        state['documents'] = []
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
+
+    return state
+
+def retrieval_backup(state: MainState) -> MainState:
+    logger.info("Starting document retrieval")
     comprehensive_query = state.get("comprehensive_query", ""); 
     similar_questions = state.get("similar_questions", [])
 
@@ -445,7 +455,6 @@ def retrieval(state: MainState) -> MainState:
 
     all_documents = []
     table_name = "public.world_bank_report"
-    
     try:
         conn = get_postgres_connection(table_name)
         logger.info("Successfully connected to the database")
@@ -861,9 +870,7 @@ def qweli_agent_RAG(state: MainState) -> MainState:
     # Update conversation history with markdown-formatted response
     state["conversation_history"].append({"role": "assistant", "content": state["qweli_response"]})
 
-    return state
-
-    print(f"State after Qweli agent: {state}")
+    
     
     # Database operations
     try:
